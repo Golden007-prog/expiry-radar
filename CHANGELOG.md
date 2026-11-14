@@ -18,8 +18,7 @@ on GitHub (`v0.1`, `v0.2`, …) and consumers pin them as
   never flags), and a PEM block carried as a JSON string literal
   (newlines escaped as `\n`) is read as a PEM block.
 - Corpus: new fixture cases for containers and embedded certs
-  (36 → 44 locally; the four cases whose fixture files are binary
-  containers land with a follow-up binary upload); tests 111 → 119.
+  (36 → 44); tests 111 → 119.
 
 ## v0.2.1 — 2026-11-14
 
