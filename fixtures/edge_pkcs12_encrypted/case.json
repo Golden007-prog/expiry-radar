@@ -1,0 +1,9 @@
+{
+  "description": "edge: PKCS#12 whose certificates are password-encrypted \u2014 the scanner cannot read them without the password, so it warns instead of passing silently; no findings, no crash",
+  "expected_findings": [],
+  "expected_safe": 0,
+  "expected_exit": 0,
+  "expected_warnings_min": 1,
+  "now": "2026-11-14",
+  "days": 90
+}
