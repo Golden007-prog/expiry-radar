@@ -122,6 +122,21 @@ python3 expiry_radar.py . --now 2027-01-01    # "what breaks by New Year?"
    GMT` (`-dates` / `-enddate` form) and `Not After : …` (`-text` form)
    lines in committed text files, classified like certificate dates.
    `notBefore` is a start date and never flags.
+7. **Certificate containers** — PKCS#12 files (`.p12` / `.pfx`, DER or
+   PEM-armored) and PKCS#7 bundles (`.p7b` / `.p7c` / `.p7m` / `.p7s`,
+   DER or PEM-armored). Every certificate a container carries is
+   classified like a standalone cert. One honest limit: certificates a
+   PKCS#12 container stores **password-encrypted** cannot be read
+   without the password (the stdlib cannot decrypt them) — the scan
+   reports the container with a warning ("no certificate could be read
+   without a password; expiry not checked") instead of passing it
+   silently, and says so again when only *some* parts were readable.
+8. **Embedded certificates** — a certificate carried as a bare base64
+   string (the shape JSON APIs and config files use) is found when the
+   decoded bytes parse as one complete X.509 certificate; random
+   base64 (keys, tokens, hashes) never parses, so it never flags. A
+   PEM block carried as a JSON string literal (newlines escaped as
+   `\n`) is read as a PEM block.
 
 ### SARIF output
 
@@ -213,7 +228,7 @@ rehearsal of the same lifecycle.
 
 ```bash
 python3 make_fixtures.py   # regenerate the fixture corpus (needs openssl CLI)
-python3 run_tests.py       # 111 tests, stdlib unittest, zero dependencies
+python3 run_tests.py       # 119 tests, stdlib unittest, zero dependencies
 ```
 
 The corpus comes first in this project: 33 cases under

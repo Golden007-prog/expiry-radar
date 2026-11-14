@@ -4,6 +4,23 @@ All notable changes to Expiry Radar, newest first. Versions are tagged
 on GitHub (`v0.1`, `v0.2`, …) and consumers pin them as
 `uses: RakTikoo/expiry-radar@v0.2`.
 
+## Unreleased
+
+- **Certificate containers**: PKCS#12 (`.p12` / `.pfx`) and PKCS#7
+  (`.p7b` / `.p7c` / `.p7m` / `.p7s`) files, DER or PEM-armored, are
+  opened and every certificate they carry is classified like a
+  standalone cert. Certificates a PKCS#12 container stores
+  password-encrypted cannot be read without the password — the scan
+  reports the container with a warning instead of passing it silently.
+- **Embedded certificates**: a certificate carried as a bare base64
+  string in JSON/config text is found when the decoded bytes parse as
+  one complete X.509 certificate (random base64 never parses, so it
+  never flags), and a PEM block carried as a JSON string literal
+  (newlines escaped as `\n`) is read as a PEM block.
+- Corpus: new fixture cases for containers and embedded certs
+  (36 → 44 locally; the four cases whose fixture files are binary
+  containers land with a follow-up binary upload); tests 111 → 119.
+
 ## v0.2.1 — 2026-11-14
 
 - Recognise timezone-aware ISO-8601 datetime expiry values (`Z` and numeric

@@ -227,15 +227,27 @@ the 61-file own repo in ~2 s. Fine for CI/weekly use; not yet optimised
    residual limit is that per-key attribution cannot distinguish code
    that *tests* a `key: "DATE"` pattern from the pattern itself —
    measured in the adversarial section below.
-3. **DER only as whole files**; no PKCS#12/PKCS#7 bundles, no JWK/JWKS
-   `exp`-style fields, no certs embedded base64-in-JSON.
+3. ~~**DER only as whole files**; no PKCS#12/PKCS#7 bundles, no
+   JWK/JWKS `exp`-style fields, no certs embedded base64-in-JSON.~~ —
+   JWK/JWKS `exp` shipped in v0.2; **containers and embedded certs
+   fixed (unreleased):** PKCS#12 (`.p12`/`.pfx`) and PKCS#7
+   (`.p7b`/`.p7c`/`.p7m`/`.p7s`) containers, DER or PEM-armored, are
+   walked with the same DER reader and every readable certificate is
+   classified; certificates stored as bare base64 in JSON/config text
+   are found when the decoded bytes parse as one complete certificate;
+   PEM blocks carried as JSON string literals (escaped `\n`) are read.
+   What remains, honestly: certificates a PKCS#12 container stores
+   **password-encrypted** cannot be read without the password (stdlib
+   cannot decrypt) — the container is reported with a warning, never
+   silently passed; PKCS#7 *enveloped* (encrypted) content likewise
+   carries no readable certificates and warns as an unreadable
+   container when it wears a PKCS#7 extension.
 4. **JWT scope:** compact JWS shape with `alg` header + numeric `exp`
    only. No `nbf`, no per-token-type handling, no signature check (by
    design), tokens split across lines/variables are missed.
-5. **Date formats:** ISO `YYYY-MM-DD` only — no epochs
-   (`"expires_at": 1767…`), no `DD/MM/YYYY`, no RFC-2822 dates, no
-   OpenSSL-style `notAfter=Dec 10 …` text (e.g. in captured openssl
-   output committed to a repo).
+5. **Date formats:** ISO `YYYY-MM-DD` only — no `DD/MM/YYYY`, no
+   RFC-2822 dates. (Epochs and OpenSSL-style `notAfter=…` text, listed
+   here as missing in v0.1, shipped in v0.2.)
 6. **Git mode scans tracked files at their working-tree contents**; a
    tracked file deleted from disk is reported unscanned. Untracked files
    in a git repo are out of scope by design (spec: git-tracked first).

@@ -77,6 +77,52 @@ def make_cert(days: int, cn: str) -> tuple[bytes, bytes]:
     return pem_bytes, der_bytes
 
 
+def make_pkcs12(days: int, cn: str, encrypt_certs: bool) -> bytes:
+    """A .p12 holding one self-signed cert. With encrypt_certs=False the
+    certificate bags are stored unencrypted (``-certpbe NONE``), so the
+    cert is readable without a password; with True, openssl's default
+    password encryption applies and no cert is readable."""
+    if shutil.which("openssl") is None:
+        raise SystemExit("make_fixtures.py needs the openssl CLI "
+                         "(fixture generation only, not the scanner)")
+    with tempfile.TemporaryDirectory() as tmp:
+        key = os.path.join(tmp, "key.pem")
+        cert = os.path.join(tmp, "cert.pem")
+        out = os.path.join(tmp, "bundle.p12")
+        subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+             "-keyout", key, "-out", cert, "-days", str(days),
+             "-subj", f"/CN={cn}/O=Expiry Radar Fixtures",
+             "-addext", "basicConstraints=critical,CA:FALSE"],
+            check=True, capture_output=True)
+        cmd = ["openssl", "pkcs12", "-export", "-out", out,
+               "-inkey", key, "-in", cert, "-passout", "pass:fixture"]
+        if not encrypt_certs:
+            cmd += ["-certpbe", "NONE", "-keypbe", "NONE"]
+        subprocess.run(cmd, check=True, capture_output=True)
+        with open(out, "rb") as fh:
+            return fh.read()
+
+
+def make_pkcs7_from_pem(pem_bytes: bytes, der_form: bool) -> bytes:
+    """A PKCS#7 SignedData bundle carrying the given PEM cert."""
+    if shutil.which("openssl") is None:
+        raise SystemExit("make_fixtures.py needs the openssl CLI "
+                         "(fixture generation only, not the scanner)")
+    with tempfile.TemporaryDirectory() as tmp:
+        cert = os.path.join(tmp, "cert.pem")
+        out = os.path.join(tmp, "bundle.p7b")
+        with open(cert, "wb") as fh:
+            fh.write(pem_bytes)
+        cmd = ["openssl", "crl2pkcs7", "-nocrl", "-certfile", cert,
+               "-out", out]
+        if der_form:
+            cmd += ["-outform", "DER"]
+        subprocess.run(cmd, check=True, capture_output=True)
+        with open(out, "rb") as fh:
+            return fh.read()
+
+
 def write_case(dirname: str, files: dict, case: dict):
     path = os.path.join(FIXTURES, dirname)
     os.makedirs(path, exist_ok=True)
@@ -126,7 +172,7 @@ def main() -> int:
             fh.write(readme)
     print(f"Generating fixtures (generation date {GEN_DATE.isoformat()}):")
 
-    far_pem, _ = make_cert(3650, "far-future.example.test")
+    far_pem, far_der = make_cert(3650, "far-future.example.test")
     soon_pem, soon_der = make_cert(30, "expiring-soon.example.test")
     soon2_pem, _ = make_cert(45, "second-chain.example.test")
     far2_pem, _ = make_cert(3650, "chain-root.example.test")
@@ -406,7 +452,78 @@ def main() -> int:
                                "status": "expiring"}],
         "expected_safe": 0, "expected_exit": 1})
 
+    # ---- containers & embedded certs --------------------------------------
+    write_case("clean_pkcs12_far_future", {
+        "certs/bundle.p12": make_pkcs12(3650, "far-future.example.test",
+                                        encrypt_certs=False),
+    }, {"description": "clean: PKCS#12 with unencrypted bags holding a "
+                        "far-future cert is safe",
+        "expected_findings": [], "expected_safe": 1, "expected_exit": 0})
+
+    write_case("fault_pkcs12_expiring", {
+        "certs/bundle.p12": make_pkcs12(30, "expiring-soon.example.test",
+                                        encrypt_certs=False),
+    }, {"description": "fault: PKCS#12 with unencrypted bags holding a "
+                        "cert expiring within 30 days",
+        "expected_findings": [{"kind": "certificate",
+                               "status": "expiring"}],
+        "expected_safe": 0, "expected_exit": 1})
+
+    write_case("fault_pkcs7_expiring", {
+        "certs/bundle.p7b": make_pkcs7_from_pem(soon_pem, der_form=True),
+    }, {"description": "fault: DER PKCS#7 SignedData bundle carrying a "
+                        "cert expiring within 30 days",
+        "expected_findings": [{"kind": "certificate",
+                               "status": "expiring"}],
+        "expected_safe": 0, "expected_exit": 1})
+
+    write_case("clean_pkcs7_far_future", {
+        "certs/bundle.p7b": make_pkcs7_from_pem(far_pem, der_form=False),
+    }, {"description": "clean: PEM-armored PKCS#7 bundle carrying a "
+                        "far-future cert is safe",
+        "expected_findings": [], "expected_safe": 1, "expected_exit": 0})
+
+    write_case("fault_embedded_base64_cert", {
+        "config/cert.json":
+            '{\n  "certificate": "'
+            + base64.b64encode(soon_der).decode() + '",\n'
+            '  "random_blob": "'
+            + base64.b64encode(b"x" * 400).decode() + '"\n}\n',
+    }, {"description": "fault: cert embedded as a bare base64 string in "
+                        "JSON, expiring within 30 days (the non-cert "
+                        "base64 blob next to it must not flag)",
+        "expected_findings": [{"kind": "certificate",
+                               "status": "expiring"}],
+        "expected_safe": 0, "expected_exit": 1})
+
+    write_case("clean_embedded_base64_far_future", {
+        "config/cert.json":
+            '{\n  "certificate": "'
+            + base64.b64encode(far_der).decode() + '"\n}\n',
+    }, {"description": "clean: cert embedded as bare base64 in JSON, "
+                        "expiring in ~10 years, is safe",
+        "expected_findings": [], "expected_safe": 1, "expected_exit": 0})
+
+    write_case("fault_pem_in_json_string", {
+        "config/cert.json": json.dumps({"pem": soon_pem.decode()}) + "\n",
+    }, {"description": "fault: PEM block carried as a JSON string "
+                        "literal (newlines escaped), cert expiring "
+                        "within 30 days",
+        "expected_findings": [{"kind": "certificate",
+                               "status": "expiring"}],
+        "expected_safe": 0, "expected_exit": 1})
+
     # ---- edge cases --------------------------------------------------------
+    write_case("edge_pkcs12_encrypted", {
+        "certs/bundle.p12": make_pkcs12(30, "expiring-soon.example.test",
+                                        encrypt_certs=True),
+    }, {"description": "edge: PKCS#12 whose certificates are "
+                        "password-encrypted — the scanner cannot read "
+                        "them without the password, so it warns instead "
+                        "of passing silently; no findings, no crash",
+        "expected_findings": [], "expected_safe": 0, "expected_exit": 0,
+        "expected_warnings_min": 1})
+
     write_case("edge_binary_certlike_bytes", {
         "blob.bin": b"\x00\x01\x02-----BEGIN CERTIFICATE-----\n"
                     b"MIIBszCCARagAwIBAgIU\x00\xff\xfe random bytes\n"

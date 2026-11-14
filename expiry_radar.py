@@ -20,6 +20,18 @@ Scans git-tracked files (fallback: a plain directory walk) for:
      no key material ever printed.
   6. (v0.2) `notAfter=` / `Not After:` lines in committed openssl text
      output — classified like certificate dates.
+  7. PKCS#12 containers (.p12/.pfx, DER or PEM-armored): certificates in
+     password-free bags are classified like any other certificate.
+     Certificates the container encrypts cannot be read without the
+     password (the stdlib cannot decrypt them) — those are reported as
+     a warning, never silently passed and never guessed at.
+  8. PKCS#7 containers (.p7b/.p7c/.p7m/.p7s, DER or PEM-armored):
+     SignedData bundles are plain containers, so every certificate they
+     carry is classified.
+  9. Certificates embedded as bare base64 (the shape JSON APIs and
+     config files use: a long base64 string that decodes to a DER
+     certificate), and PEM blocks carried as JSON string literals
+     (newlines escaped as \\n).
 
 Reports: human text (default), `--json`, and `--sarif` (SARIF 2.1.0 for
 GitHub code scanning; mutually exclusive with `--json`).
@@ -466,6 +478,15 @@ def scan_certs_pem(data: bytes, rel: str, now, days, warnings,
                             f"headers (line {line}) — not parsed")
             continue
         raw_b64 = re.sub(rb"\s+", b"", body)
+        if (not raw_b64 or re.search(rb"[^A-Za-z0-9+/=]", raw_b64)) \
+                and b"\\n" in body:
+            # A PEM block carried as a JSON string literal keeps its
+            # newlines as the two characters "\n" — unescape and retry
+            # before calling the block unparseable.
+            unescaped = (body.replace(b"\\r\\n", b"\n")
+                             .replace(b"\\n", b"\n")
+                             .replace(b"\\r", b"\n"))
+            raw_b64 = re.sub(rb"\s+", b"", unescaped)
         if not raw_b64 or re.search(rb"[^A-Za-z0-9+/=]", raw_b64):
             warnings.append(f"{rel}: unparseable PEM certificate block "
                             f"(line {line}): non-base64 data in body")
@@ -511,6 +532,285 @@ def scan_cert_der(data: bytes, rel: str, now, days, warnings,
         detail=f"subject: {_cap(info.subject)}; issuer: {_cap(info.issuer)}",
         evidence="DER certificate",
     )]
+
+
+# --------------------------------------------------------------------------
+# Containers & embedded certificates: PKCS#12, PKCS#7, bare base64.
+# All three reuse parse_certificate_der; containers are walked with the
+# same minimal DER reader. Password-encrypted content is never guessed
+# at — it is counted and reported as not read.
+# --------------------------------------------------------------------------
+
+OID_DATA = "1.2.840.113549.1.7.1"
+OID_SIGNED_DATA = "1.2.840.113549.1.7.2"
+OID_ENCRYPTED_DATA = "1.2.840.113549.1.7.6"
+OID_CERT_BAG = "1.2.840.113549.1.12.10.1.3"
+
+PKCS12_EXTENSIONS = {".p12", ".pfx"}
+PKCS7_EXTENSIONS = {".p7b", ".p7c", ".p7m", ".p7s"}
+PKCS7_BEGIN = b"-----BEGIN PKCS7-----"
+PKCS7_END = b"-----END PKCS7-----"
+PKCS12_BEGIN = b"-----BEGIN PKCS12-----"
+PKCS12_END = b"-----END PKCS12-----"
+
+
+def _cert_finding(info, rel, line, now, days, evidence):
+    status, days_left = classify(info.not_after, now, days)
+    return Finding(
+        kind="certificate", status=status, path=rel, line=line,
+        expires=info.not_after.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        days_left=days_left,
+        detail=f"subject: {_cap(info.subject)}; "
+               f"issuer: {_cap(info.issuer)}",
+        evidence=evidence)
+
+
+def _content_info_parts(tlv):
+    """(oid, content_tlv_or_None) for a ContentInfo (tag, value, raw)."""
+    children = _tlvs(tlv[1])
+    if not children or children[0][0] != 0x06:
+        raise DerError("ContentInfo without a content-type OID")
+    oid = _parse_oid(children[0][1])
+    content = None
+    if len(children) > 1 and children[1][0] == 0xA0:
+        inner = _tlvs(children[1][1])
+        if inner:
+            content = inner[0]
+    return oid, content
+
+
+def _pkcs7_certs(data: bytes):
+    """Certificates carried by a DER PKCS#7 SignedData. A PKCS#7 bundle
+    is a plain container (no password), so its certificates are fully
+    readable. Raises DerError when the bytes are not SignedData."""
+    tag, value, end = _read_tlv(data, 0)
+    if tag != 0x30 or end != len(data):
+        raise DerError("not a PKCS#7 ContentInfo SEQUENCE")
+    oid, content = _content_info_parts((tag, value, data))
+    if oid != OID_SIGNED_DATA:
+        raise DerError(f"PKCS#7 content type is {oid}, not signedData")
+    if content is None or content[0] != 0x30:
+        raise DerError("SignedData missing")
+    certs = []
+    for child in _tlvs(content[1]):
+        if child[0] != 0xA0:
+            continue
+        for sub in _tlvs(child[1]):
+            if sub[0] != 0x30:
+                continue
+            try:
+                certs.append(parse_certificate_der(sub[2]))
+            except (DerError, ValueError, UnicodeDecodeError):
+                continue
+    return certs
+
+
+def _safe_bag_certs(bag):
+    """Certificates in one SafeBag TLV; [] for non-certificate bags."""
+    if bag[0] != 0x30:
+        return []
+    try:
+        parts = _tlvs(bag[1])
+        if len(parts) < 2 or parts[0][0] != 0x06:
+            return []
+        if _parse_oid(parts[0][1]) != OID_CERT_BAG or parts[1][0] != 0xA0:
+            return []
+        inner = _tlvs(parts[1][1])
+        if not inner or inner[0][0] != 0x30:
+            return []
+        cert_bag = _tlvs(inner[0][1])
+        if len(cert_bag) < 2 or cert_bag[1][0] != 0xA0:
+            return []
+        octets = _tlvs(cert_bag[1][1])
+        if not octets or octets[0][0] != 0x04:
+            return []
+        return [parse_certificate_der(octets[0][1])]
+    except (DerError, ValueError, UnicodeDecodeError):
+        return []
+
+
+def _pkcs12_certs(data: bytes):
+    """(certs, encrypted_parts) for a DER PKCS#12 (PFX). Only
+    certificates in password-free bags can be read — the stdlib cannot
+    decrypt, and this tool never guesses: encrypted content infos are
+    counted so the caller can report them as not read. Raises DerError
+    when the bytes are not a PFX at all."""
+    tag, value, end = _read_tlv(data, 0)
+    if tag != 0x30 or end != len(data):
+        raise DerError("not a PKCS#12 PFX SEQUENCE")
+    top = _tlvs(value)
+    if len(top) < 2 or top[0][0] != 0x02 or not top[0][1]:
+        raise DerError("PFX without a version INTEGER")
+    version = int.from_bytes(top[0][1], "big")
+    if version != 3:
+        raise DerError(f"PFX version is {version}, not 3")
+    oid, content = _content_info_parts(top[1])
+    if oid != OID_DATA or content is None or content[0] != 0x04:
+        raise DerError("PFX authSafe is not a data ContentInfo")
+    auth_tag, auth_value, auth_end = _read_tlv(content[1], 0)
+    if auth_tag != 0x30 or auth_end != len(content[1]):
+        raise DerError("AuthenticatedSafe is not a SEQUENCE")
+    certs = []
+    encrypted = 0
+    for ci in _tlvs(auth_value):
+        if ci[0] != 0x30:
+            continue
+        try:
+            c_oid, c_content = _content_info_parts(ci)
+        except DerError:
+            continue
+        if c_oid == OID_ENCRYPTED_DATA:
+            encrypted += 1
+            continue
+        if c_oid != OID_DATA or c_content is None or c_content[0] != 0x04:
+            continue
+        try:
+            sc_tag, sc_value, sc_end = _read_tlv(c_content[1], 0)
+            if sc_tag != 0x30 or sc_end != len(c_content[1]):
+                continue
+            for bag in _tlvs(sc_value):
+                certs.extend(_safe_bag_certs(bag))
+        except DerError:
+            continue
+    return certs, encrypted
+
+
+def scan_pkcs12(data, rel, now, days, warnings):
+    """A .p12/.pfx container. Certificates in password-free bags are
+    classified like any other certificate; a container whose
+    certificates cannot be read without a password produces a warning —
+    never silence, never a guess."""
+    try:
+        certs, encrypted = _pkcs12_certs(data)
+    except (DerError, ValueError, UnicodeDecodeError) as exc:
+        warnings.append(f"{rel}: file with PKCS#12 extension is not a "
+                        f"readable PKCS#12 container: {_cap(exc)}")
+        return []
+    findings = [_cert_finding(info, rel, 1, now, days,
+                              "PKCS#12 certificate") for info in certs]
+    if not certs:
+        warnings.append(f"{rel}: PKCS#12 container — no certificate "
+                        "could be read without a password (contents "
+                        "encrypted or not certificates); expiry not "
+                        "checked")
+    elif encrypted:
+        warnings.append(f"{rel}: PKCS#12 container — {encrypted} "
+                        "encrypted part(s) not read; only the "
+                        "unencrypted certificates were checked")
+    return findings
+
+
+def scan_pkcs7_der(data, rel, now, days, warnings, warn_on_fail=True):
+    """A whole-file DER PKCS#7 container (.p7b/.p7c/.p7m/.p7s)."""
+    try:
+        certs = _pkcs7_certs(data)
+    except (DerError, ValueError, UnicodeDecodeError) as exc:
+        if warn_on_fail:
+            warnings.append(f"{rel}: file with PKCS#7 extension is not "
+                            f"a readable PKCS#7 SignedData container: "
+                            f"{_cap(exc)}")
+        return []
+    if not certs:
+        warnings.append(f"{rel}: PKCS#7 SignedData container carries "
+                        "no certificates; nothing to check")
+        return []
+    return [_cert_finding(info, rel, 1, now, days, "PKCS#7 certificate")
+            for info in certs]
+
+
+def _scan_armored_containers(data, rel, now, days, warnings, offsets,
+                             begin, end_marker, label, extract, evidence):
+    """PEM-armored containers (-----BEGIN PKCS7----- / PKCS12-----):
+    same loose accounting as scan_certs_pem — every block is parsed or
+    produces a warning."""
+    findings = []
+    pos = 0
+    while True:
+        start = data.find(begin, pos)
+        if start == -1:
+            break
+        line = _line_number(offsets, start)
+        end = data.find(end_marker, start + len(begin))
+        if end == -1:
+            warnings.append(f"{rel}: unterminated {label} block "
+                            f"(line {line}): missing END marker")
+            break
+        body = data[start + len(begin):end]
+        pos = end + len(end_marker)
+        raw_b64 = re.sub(rb"\s+", b"", body)
+        try:
+            der = base64.b64decode(raw_b64, validate=True)
+            certs = extract(der)
+        except (binascii.Error, DerError, ValueError,
+                UnicodeDecodeError) as exc:
+            warnings.append(f"{rel}: unparseable {label} block "
+                            f"(line {line}): {_cap(exc)}")
+            continue
+        if not certs:
+            warnings.append(f"{rel}: {label} block (line {line}) "
+                            "carries no readable certificates")
+        for info in certs:
+            findings.append(_cert_finding(info, rel, line, now, days,
+                                          evidence))
+    return findings
+
+
+B64_RUN_RE = re.compile(rb"[A-Za-z0-9+/]{256,}={0,2}")
+MAX_EMBEDDED_CERT = 64 * 1024
+
+
+def _armored_spans(data):
+    spans = []
+    for begin, end_marker in ((PEM_BEGIN, PEM_END),
+                              (PKCS7_BEGIN, PKCS7_END),
+                              (PKCS12_BEGIN, PKCS12_END)):
+        pos = 0
+        while True:
+            start = data.find(begin, pos)
+            if start == -1:
+                break
+            end = data.find(end_marker, start + len(begin))
+            if end == -1:
+                spans.append((start, len(data)))
+                break
+            spans.append((start, end + len(end_marker)))
+            pos = end + len(end_marker)
+    return spans
+
+
+def scan_embedded_certs(data, rel, now, days, warnings,
+                        newline_offsets=None):
+    """Certificates carried as bare base64 — the shape JSON APIs and
+    config files use (a long base64 string value that decodes to a DER
+    certificate). A run becomes a finding only when the decoded bytes
+    parse as one complete X.509 certificate: random base64 (keys,
+    tokens, hashes, JWT segments) never parses, so it never flags.
+    Runs inside PEM / PKCS#7 / PKCS#12 armor belong to those scanners
+    and are skipped here."""
+    findings = []
+    offsets = (newline_offsets if newline_offsets is not None
+               else _newline_offsets(data))
+    spans = _armored_spans(data)
+    for m in B64_RUN_RE.finditer(data):
+        if any(s <= m.start() < e for s, e in spans):
+            continue
+        raw = m.group(0)
+        if len(raw) % 4:
+            raw = raw[:len(raw) - (len(raw) % 4)]
+        try:
+            der = base64.b64decode(raw, validate=True)
+        except (binascii.Error, ValueError):
+            continue
+        if len(der) > MAX_EMBEDDED_CERT or not der.startswith(b"\x30"):
+            continue
+        try:
+            info = parse_certificate_der(der)
+        except (DerError, ValueError, UnicodeDecodeError):
+            continue
+        findings.append(_cert_finding(
+            info, rel, _line_number(offsets, m.start()), now, days,
+            "embedded base64 certificate"))
+    return findings
 
 
 def _b64url_decode(segment: bytes) -> bytes:
@@ -1252,6 +1552,16 @@ def scan(root: str, now: datetime, days: int = DEFAULT_DAYS,
             })
             continue
         ext = os.path.splitext(rel)[1].lower()
+        if _is_binary(data) and ext in PKCS12_EXTENSIONS:
+            result.files_scanned += 1
+            result.findings.extend(scan_pkcs12(
+                data, rel, now, days, result.warnings))
+            continue
+        if _is_binary(data) and ext in PKCS7_EXTENSIONS:
+            result.files_scanned += 1
+            result.findings.extend(scan_pkcs7_der(
+                data, rel, now, days, result.warnings))
+            continue
         if _is_binary(data):
             # Binary: the only artefact we trust here is a whole-file
             # DER certificate — attempted for cert extensions, and for
@@ -1277,6 +1587,17 @@ def scan(root: str, now: datetime, days: int = DEFAULT_DAYS,
         offsets = _newline_offsets(data)
         file_findings = []
         file_findings.extend(scan_certs_pem(
+            data, rel, now, days, result.warnings,
+            newline_offsets=offsets))
+        file_findings.extend(_scan_armored_containers(
+            data, rel, now, days, result.warnings, offsets,
+            PKCS7_BEGIN, PKCS7_END, "PKCS#7", _pkcs7_certs,
+            "PKCS#7 certificate"))
+        file_findings.extend(_scan_armored_containers(
+            data, rel, now, days, result.warnings, offsets,
+            PKCS12_BEGIN, PKCS12_END, "PKCS#12",
+            lambda der: _pkcs12_certs(der)[0], "PKCS#12 certificate"))
+        file_findings.extend(scan_embedded_certs(
             data, rel, now, days, result.warnings,
             newline_offsets=offsets))
         if ext in DER_EXTENSIONS and PEM_BEGIN not in data:

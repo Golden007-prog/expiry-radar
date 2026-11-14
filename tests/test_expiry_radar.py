@@ -485,6 +485,141 @@ class TestDerAndPemWarnings(unittest.TestCase):
         self.assertTrue(any("legacy headers" in w for w in result.warnings))
 
 
+def _tlv(tag, value):
+    if len(value) < 128:
+        return bytes([tag, len(value)]) + value
+    lb = len(value).to_bytes((len(value).bit_length() + 7) // 8, "big")
+    return bytes([tag, 0x80 | len(lb)]) + lb + value
+
+
+def _oid_tlv(*arcs):
+    body = bytearray([40 * arcs[0] + arcs[1]])
+    for arc in arcs[2:]:
+        chunk = [arc & 0x7F]
+        arc >>= 7
+        while arc:
+            chunk.append(0x80 | (arc & 0x7F))
+            arc >>= 7
+        body.extend(reversed(chunk))
+    return _tlv(0x06, bytes(body))
+
+
+_OID_DATA = (1, 2, 840, 113549, 1, 7, 1)
+_OID_SIGNED = (1, 2, 840, 113549, 1, 7, 2)
+_OID_ENCRYPTED = (1, 2, 840, 113549, 1, 7, 6)
+_OID_CERT_BAG = (1, 2, 840, 113549, 1, 12, 10, 1, 3)
+_OID_X509 = (1, 2, 840, 113549, 1, 9, 22, 1)
+
+
+def _fixture_cert_der():
+    b64 = er.PEM_RE.search(load_cert_pem()).group(1)
+    return base64.b64decode(b"".join(b64.split()))
+
+
+def _build_pkcs7(cert_der):
+    certs = _tlv(0xA0, cert_der)
+    content_info = _tlv(0x30, _oid_tlv(*_OID_DATA)
+                        + _tlv(0xA0, _tlv(0x04, b"")))
+    signed = _tlv(0x30, _tlv(0x02, b"\x01") + _tlv(0x31, b"")
+                  + content_info + certs)
+    return _tlv(0x30, _oid_tlv(*_OID_SIGNED) + _tlv(0xA0, signed))
+
+
+def _build_pkcs12(cert_der=None, encrypted=False):
+    if encrypted:
+        inner = _tlv(0x30, _oid_tlv(*_OID_ENCRYPTED)
+                     + _tlv(0xA0, _tlv(0x30, b"")))
+    else:
+        cert_bag = _tlv(0x30, _oid_tlv(*_OID_X509)
+                        + _tlv(0xA0, _tlv(0x04, cert_der)))
+        safe_bag = _tlv(0x30, _oid_tlv(*_OID_CERT_BAG)
+                        + _tlv(0xA0, cert_bag))
+        safe_contents = _tlv(0x30, safe_bag)
+        inner = _tlv(0x30, _oid_tlv(*_OID_DATA)
+                     + _tlv(0xA0, _tlv(0x04, safe_contents)))
+    auth_safe = _tlv(0x30, inner)
+    auth_ci = _tlv(0x30, _oid_tlv(*_OID_DATA)
+                   + _tlv(0xA0, _tlv(0x04, auth_safe)))
+    return _tlv(0x30, _tlv(0x02, b"\x03") + auth_ci)
+
+
+class TestContainersAndEmbedded(unittest.TestCase):
+    """PKCS#12 / PKCS#7 containers and embedded base64 certificates."""
+
+    def scan_tmp(self, files):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for rel, content in files.items():
+            full = os.path.join(tmp.name, rel)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            mode = "wb" if isinstance(content, bytes) else "w"
+            with open(full, mode) as fh:
+                fh.write(content)
+        return er.scan(tmp.name, now=NOW)
+
+    def test_pkcs7_der_cert_found(self):
+        result = self.scan_tmp({"bundle.p7b": _build_pkcs7(
+            _fixture_cert_der())})
+        certs = [f for f in result.findings if f.kind == "certificate"]
+        self.assertEqual(len(certs), 1)
+        self.assertEqual(certs[0].evidence, "PKCS#7 certificate")
+        self.assertEqual(certs[0].status, "expiring")
+
+    def test_pkcs12_unencrypted_bag_cert_found(self):
+        result = self.scan_tmp({"bundle.p12": _build_pkcs12(
+            _fixture_cert_der())})
+        certs = [f for f in result.findings if f.kind == "certificate"]
+        self.assertEqual(len(certs), 1)
+        self.assertEqual(certs[0].evidence, "PKCS#12 certificate")
+
+    def test_pkcs12_encrypted_content_warns_not_silent(self):
+        result = self.scan_tmp({"bundle.p12": _build_pkcs12(
+            encrypted=True)})
+        self.assertEqual(result.findings, [])
+        self.assertTrue(any("PKCS#12" in w and "password" in w
+                            for w in result.warnings))
+        self.assertEqual(result.unscanned, [])
+
+    def test_pkcs12_garbage_warns(self):
+        warnings = []
+        self.assertEqual(er.scan_pkcs12(b"\x30\x03\x02\x01\x05", "x.p12",
+                                        NOW, 90, warnings), [])
+        self.assertTrue(any("not a readable PKCS#12" in w
+                            for w in warnings))
+
+    def test_embedded_base64_cert_in_json(self):
+        doc = json.dumps({
+            "certificate": base64.b64encode(
+                _fixture_cert_der()).decode(),
+            "random_blob": base64.b64encode(b"x" * 400).decode(),
+        })
+        result = self.scan_tmp({"config.json": doc})
+        certs = [f for f in result.findings if f.kind == "certificate"]
+        self.assertEqual(len(certs), 1)
+        self.assertEqual(certs[0].evidence, "embedded base64 certificate")
+
+    def test_embedded_base64_non_cert_ignored(self):
+        doc = json.dumps({
+            "a": base64.b64encode(b"\x30" + b"\x00" * 400).decode(),
+            "b": base64.b64encode(os.urandom(600)).decode(),
+        })
+        result = self.scan_tmp({"config.json": doc})
+        self.assertEqual(result.findings, [])
+
+    def test_pem_block_in_json_string(self):
+        doc = json.dumps({"pem": load_cert_pem().decode()})
+        result = self.scan_tmp({"config.json": doc})
+        certs = [f for f in result.findings if f.kind == "certificate"]
+        self.assertEqual(len(certs), 1)
+        self.assertEqual(certs[0].evidence, "PEM certificate")
+
+    def test_pem_cert_not_double_counted_as_embedded(self):
+        result = self.scan_tmp({"cert.pem": load_cert_pem()})
+        certs = [f for f in result.findings if f.kind == "certificate"]
+        self.assertEqual(len(certs), 1)
+        self.assertEqual(certs[0].evidence, "PEM certificate")
+
+
 class TestRedaction(unittest.TestCase):
     """Fix 8: claims never printed; evidence masked; T3 full-token check."""
 

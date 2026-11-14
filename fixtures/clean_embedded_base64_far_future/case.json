@@ -1,0 +1,8 @@
+{
+  "description": "clean: cert embedded as bare base64 in JSON, expiring in ~10 years, is safe",
+  "expected_findings": [],
+  "expected_safe": 1,
+  "expected_exit": 0,
+  "now": "2026-11-14",
+  "days": 90
+}
