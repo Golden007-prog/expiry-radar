@@ -1,5 +1,7 @@
 # ⏰ Expiry Radar
 
+[![Tests](https://github.com/RakTikoo/expiry-radar/actions/workflows/tests.yml/badge.svg)](https://github.com/RakTikoo/expiry-radar/actions/workflows/tests.yml)
+
 **Expiry Radar finds everything in your repo that will break on a known future date — expiring X.509 certificates, committed JWTs past their `exp`, and hardcoded valid-until dates in test fixtures — before your CI finds out the hard way.**
 
 ![Expiry Radar terminal demo](expiry-radar.gif)
@@ -211,7 +213,7 @@ rehearsal of the same lifecycle.
 
 ```bash
 python3 make_fixtures.py   # regenerate the fixture corpus (needs openssl CLI)
-python3 run_tests.py       # 109 tests, stdlib unittest, zero dependencies
+python3 run_tests.py       # 111 tests, stdlib unittest, zero dependencies
 ```
 
 The corpus comes first in this project: 33 cases under

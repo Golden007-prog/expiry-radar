@@ -4,7 +4,7 @@ All notable changes to Expiry Radar, newest first. Versions are tagged
 on GitHub (`v0.1`, `v0.2`, …) and consumers pin them as
 `uses: RakTikoo/expiry-radar@v0.2`.
 
-## Unreleased
+## v0.2.1 — 2026-11-14
 
 - Recognise timezone-aware ISO-8601 datetime expiry values (`Z` and numeric
   offsets), using instant-based classification while preserving plain-date
