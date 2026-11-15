@@ -4,7 +4,7 @@ All notable changes to Expiry Radar, newest first. Versions are tagged
 on GitHub (`v0.1`, `v0.2`, …) and consumers pin them as
 `uses: RakTikoo/expiry-radar@v0.2`.
 
-## Unreleased
+## v0.3.0 — 2026-11-14
 
 - **Certificate containers**: PKCS#12 (`.p12` / `.pfx`) and PKCS#7
   (`.p7b` / `.p7c` / `.p7m` / `.p7s`) files, DER or PEM-armored, are
