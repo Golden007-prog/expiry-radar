@@ -46,11 +46,21 @@ nobody runs.
 
 ## Install & run
 
+Expiry Radar is a single file, Python 3.9+, nothing to install.
+Get the file (pinned to the v0.3.0 release):
+
 ```bash
+curl -O https://raw.githubusercontent.com/RakTikoo/expiry-radar/v0.3.0/expiry_radar.py
 python3 expiry_radar.py /path/to/repo
 ```
 
-That's it — a single file, Python 3.9+, nothing to install.
+Or install it as a command with pip (still the same single file,
+standard library only):
+
+```bash
+pip install git+https://github.com/RakTikoo/expiry-radar
+expiry-radar /path/to/repo
+```
 
 ```bash
 python3 expiry_radar.py .                     # text report
@@ -185,7 +195,7 @@ repo ships one for its own test corpus.
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: RakTikoo/expiry-radar@v0.2
+- uses: RakTikoo/expiry-radar@v0.3.0
 ```
 
 Or copy [`examples/expiry-radar.yml`](examples/expiry-radar.yml) into
@@ -203,6 +213,32 @@ edited that same issue in place on the second run, and — once the
 artefacts were fixed — commented "✅ Expiry Radar is clean" and closed
 it on the third. The `consumer-sim/` folder in this repo is the local
 rehearsal of the same lifecycle.
+
+## Use as a library
+
+The scanner is one importable module — `import expiry_radar` works
+wherever the file (or the pip install) is on your path. The public
+surface is the same code the CLI runs: `parse_certificate_der` turns
+DER bytes into a `CertInfo` (subject, issuer, validity window), and
+`classify` applies the warning window:
+
+```python
+from datetime import datetime, timezone
+import expiry_radar
+
+der = open("cert.der", "rb").read()
+info = expiry_radar.parse_certificate_der(der)
+print(info.subject)     # CN=api.example.test
+print(info.not_after)   # 2026-12-15 09:29:13+00:00
+
+status, days_left = expiry_radar.classify(
+    info.not_after, datetime.now(timezone.utc), 90)
+print(status, days_left)  # expiring 29
+```
+
+For a whole-repo scan from Python, call
+`expiry_radar.scan(root, now, days)` and render the result with
+`render_text` / `to_json_dict`.
 
 ## MVP scope — what is NOT in v1
 

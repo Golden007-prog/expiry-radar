@@ -3,9 +3,10 @@
 # Copy to .github/workflows/expiry-radar.yml in your repo.
 # Behaviour:
 #   * runs every Monday 09:00 UTC (and on demand via workflow_dispatch)
-#   * scans the repo ONCE with the Expiry Radar CLI (stdlib-only Python),
-#     in JSON form; the text report in the issue is rendered from that
-#     same JSON, so the two formats can never disagree
+#   * scans the repo ONCE with the published Expiry Radar GitHub Action;
+#     the Action writes the text report to expiry-radar-report.txt in
+#     the workspace, and the tracking issue below is built from that
+#     same report
 #   * a scanner exit code above 2 (3 = usage error) fails the workflow
 #     as a broken invocation — it is never treated as findings
 #   * opens a single issue labelled "expiry-radar" and titled
@@ -16,7 +17,8 @@
 # Requires: permissions issues: write (below). Uses the built-in
 # GITHUB_TOKEN via the gh CLI that ships on GitHub-hosted runners.
 #
-# NOTE: proven live on GitHub Actions (2026-11-11) in the dogfood repo
+# NOTE: the tracking-issue lifecycle is proven live on GitHub Actions
+# (2026-11-11) in the dogfood repo
 # https://github.com/RakTikoo/expiry-radar-dogfood — across three runs
 # the tracking issue opened with the planted findings, was edited in
 # place on the next run, and was commented + closed once the artefacts
@@ -45,62 +47,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-
-      # Replace this step's command with the published action once the
-      # repo is public; for a vendored copy, check expiry_radar.py into
-      # your repo and run it directly as shown.
-      - name: Run Expiry Radar (single run, JSON)
+      # The published Action runs the scan (text report, teed to
+      # expiry-radar-report.txt) and outputs the scanner's exit code.
+      # The Action step itself exits with that code, so
+      # continue-on-error is set: findings (1/2) are handled by the
+      # issue step below, and only a usage error (3) fails the job.
+      - name: Run Expiry Radar
         id: scan
-        run: |
-          set +e
-          python3 expiry_radar.py . --json > expiry-radar.json
-          code=$?
-          set -e
-          echo "exit-code=$code" >> "$GITHUB_OUTPUT"
-          if [ "$code" -gt 2 ]; then
-            echo "::error::Expiry Radar usage error (exit $code) — broken invocation, not findings."
-            exit "$code"
-          fi
-          # Render the human-readable report from the same JSON run.
-          python3 - <<'PYEOF'
-          import json
-          with open("expiry-radar.json") as fh:
-              report = json.load(fh)
-          lines = [
-              f"Expiry Radar {report['version']} — as of {report['now']}, "
-              f"warning window {report['days']}d, "
-              f"files scanned: {report['files_scanned']}",
-              "",
-          ]
-          for f in report["findings"]:
-              lines.append(
-                  f"[{f['status'].upper()}] {f['kind']} "
-                  f"{f['path']}:{f['line']}  expires {f['expires']} "
-                  f"({f['days_left']:+d}d)  {f['detail']}")
-          if not report["findings"]:
-              lines.append("No expired or expiring artefacts found.")
-          s = report["summary"]
-          lines += [
-              "",
-              f"Summary: {s['expired']} expired, {s['expiring']} expiring, "
-              f"{s['safe']} safe, {s['unscanned']} unscanned, "
-              f"{s['warnings']} warnings",
-          ]
-          for item in report["unscanned"]:
-              lines.append(f"Unscanned: {item['path']}: {item['reason']}")
-          for warning in report["warnings"]:
-              lines.append(f"Warning: {warning}")
-          with open("expiry-radar-report.txt", "w") as fh:
-              fh.write("\n".join(lines) + "\n")
-          PYEOF
+        uses: RakTikoo/expiry-radar@v0.3.0
+        continue-on-error: true
 
       - name: Open or update the ⏰ Expiry Radar issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          code="${{ steps.scan.outputs.exit-code }}"
+          if [ "$code" -gt 2 ]; then
+            echo "::error::Expiry Radar usage error (exit $code) — broken invocation, not findings."
+            exit "$code"
+          fi
           title="⏰ Expiry Radar"
           label="expiry-radar"
           gh label create "$label" --description "Expiry Radar tracking issue" --force
@@ -109,7 +74,7 @@ jobs:
           number=$(gh issue list --state open --label "$label" --limit 1000 \
             --json number,title \
             --jq "[.[] | select(.title == \"$title\")][0].number // empty")
-          if [ "${{ steps.scan.outputs.exit-code }}" = "0" ]; then
+          if [ "$code" = "0" ]; then
             if [ -n "$number" ]; then
               gh issue comment "$number" --body "✅ Expiry Radar is clean as of $(date -u +%F). Closing."
               gh issue close "$number"

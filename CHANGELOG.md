@@ -2,7 +2,21 @@
 
 All notable changes to Expiry Radar, newest first. Versions are tagged
 on GitHub (`v0.1`, `v0.2`, …) and consumers pin them as
-`uses: RakTikoo/expiry-radar@v0.2`.
+`uses: RakTikoo/expiry-radar@v0.3.0`.
+
+## Unreleased
+
+- **Packaging**: new `pyproject.toml` —
+  `pip install git+https://github.com/RakTikoo/expiry-radar` now
+  installs the single-file module plus an `expiry-radar` console
+  command. The scanner file itself is unchanged and still runs
+  standalone with `python3 expiry_radar.py`.
+- **Docs**: the Install section now shows how to get the file (a
+  `curl` one-liner pinned to the release tag, or the pip install);
+  the README's GitHub Action pin is updated `@v0.2` → `@v0.3.0`;
+  `examples/expiry-radar.yml` now uses the published Action instead
+  of teaching a vendored copy; new "Use as a library" README section
+  (`parse_certificate_der`, `classify`, `scan`).
 
 ## v0.3.0 — 2026-11-14
 
