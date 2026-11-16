@@ -11,6 +11,8 @@ dates that are already sitting there, and report days-to-expiry per item.
 Python standard library only. No network, no account, no token, no LLM.
 Scanned files are read as bytes and never executed.
 
+**First contribution?** Start with a [good first issue](https://github.com/RakTikoo/expiry-radar/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
+
 ## See it work
 
 Real output (captured 2026-11-11, path abbreviated) — a scan of the
